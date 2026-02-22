@@ -286,6 +286,54 @@ impl StellarSaveContract {
 
         Ok(())
     }
+
+    /// Lists groups with cursor-based pagination and optional status filtering.
+    /// Tasks: Pagination, Status Filtering, Gas Optimization.
+    pub fn list_groups(
+        env: Env,
+        cursor: u64,
+        limit: u32,
+        status_filter: Option<GroupStatus>,
+    ) -> Result<Vec<Group>, StellarSaveError> {
+        let mut groups = Vec::new(&env);
+        let max_id_key = StorageKeyBuilder::next_group_id();
+        
+        // 1. Get the current maximum ID to know where to stop
+        let current_max_id: u64 = env.storage().persistent().get(&max_id_key).unwrap_or(0);
+        
+        // 2. Optimization: Start from the cursor and move backwards or forwards
+        // Here we go backwards from the cursor to show newest groups first
+        let start = if cursor == 0 { current_max_id } else { cursor };
+        let mut count = 0;
+        let page_limit = if limit > 50 { 50 } else { limit }; // Safety cap for gas
+
+        for id in (1..=start).rev() {
+            if count >= page_limit {
+                break;
+            }
+
+            let group_key = StorageKeyBuilder::group_data(id);
+            if let Some(group) = env.storage().persistent().get::<_, Group>(&group_key) {
+                
+                // 3. Optional Status Filtering
+                if let Some(ref filter) = status_filter {
+                    let status_key = StorageKeyBuilder::group_status(id);
+                    let status = env.storage().persistent().get::<_, GroupStatus>(&status_key)
+                        .unwrap_or(GroupStatus::Pending);
+                    
+                    if &status == filter {
+                        groups.push_back(group);
+                        count += 1;
+                    }
+                } else {
+                    groups.push_back(group);
+                    count += 1;
+                }
+            }
+        }
+
+        Ok(groups)
+    }
 }
 
 
@@ -385,5 +433,29 @@ mod tests {
         // ... setup and add a member to the group ...
         
         client.delete_group(&group_id);
+    }
+
+    #[test]
+    fn test_list_groups_pagination() {
+        let env = Env::default();
+        // ... setup contract and create 5 groups ...
+
+        // List 2 groups starting from the top
+        let page1 = client.list_groups(&0, &2, &None);
+        assert_eq!(page1.len(), 2);
+        
+        // Get the next page using the last ID as a cursor
+        let last_id = page1.get(1).unwrap().id;
+        let page2 = client.list_groups(&(last_id - 1), &2, &None);
+        assert_eq!(page2.len(), 2);
+    }
+
+    #[test]
+    fn test_list_groups_filtering() {
+        let env = Env::default();
+        // ... setup contract, create 1 Active group and 1 Pending group ...
+        
+        let active_only = client.list_groups(&0, &10, &Some(GroupStatus::Active));
+        assert_eq!(active_only.len(), 1);
     }
 }
