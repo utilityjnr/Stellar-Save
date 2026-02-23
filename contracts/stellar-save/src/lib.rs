@@ -353,6 +353,42 @@ impl StellarSaveContract {
         env.storage().persistent().get(&key).unwrap_or(0)
     }
 
+    /// Determines who should receive the next payout.
+    /// 
+    /// # Arguments
+    /// * `env` - Soroban environment
+    /// * `group_id` - ID of the group
+    /// 
+    /// # Returns
+    /// * `Ok(Address)` - Address of the next recipient
+    /// * `Err(StellarSaveError)` if group not found or all payouts complete
+    pub fn get_next_recipient(env: Env, group_id: u64) -> Result<Address, StellarSaveError> {
+        let members_key = StorageKeyBuilder::group_members(group_id);
+        let members: Vec<Address> = env.storage()
+            .persistent()
+            .get(&members_key)
+            .ok_or(StellarSaveError::GroupNotFound)?;
+        
+        let group_key = StorageKeyBuilder::group_data(group_id);
+        let group: Group = env.storage()
+            .persistent()
+            .get(&group_key)
+            .ok_or(StellarSaveError::GroupNotFound)?;
+        
+        if group.current_cycle >= members.len() {
+            return Err(StellarSaveError::InvalidState);
+        }
+        
+        for (idx, member) in members.iter().enumerate() {
+            let payout_key = StorageKeyBuilder::payout_recipient(group_id, idx as u32);
+            if !env.storage().persistent().has(&payout_key) {
+                return Ok(member);
+            }
+        }
+        
+        Err(StellarSaveError::InvalidState)
+    }
+
     /// Allows a member to contribute to the current cycle.
     /// 
     /// # Arguments
@@ -762,5 +798,205 @@ mod tests {
         // Action: Try to contribute while group is pending
         env.mock_all_auths();
         client.contribute(&group_id, &member);
+    }
+
+    #[test]
+    fn test_get_next_recipient_first_member() {
+        let env = Env::default();
+        let contract_id = env.register_contract(None, StellarSaveContract);
+        let client = StellarSaveContractClient::new(&env, &contract_id);
+        
+        let member1 = Address::generate(&env);
+        let member2 = Address::generate(&env);
+        let member3 = Address::generate(&env);
+
+        let group_id = 1;
+        
+        // Setup: Create members list
+        let mut members = Vec::new(&env);
+        members.push_back(member1.clone());
+        members.push_back(member2.clone());
+        members.push_back(member3.clone());
+        
+        let members_key = StorageKeyBuilder::group_members(group_id);
+        env.storage().persistent().set(&members_key, &members);
+        
+        // Create group with current_cycle = 0
+        let group = Group::new(group_id, member1.clone(), 100, 3600, 3, 2, env.ledger().timestamp());
+        env.storage().persistent().set(&StorageKeyBuilder::group_data(group_id), &group);
+
+        // Action: Get next recipient (no payouts yet)
+        let next = client.get_next_recipient(&group_id);
+        
+        // Verify: First member should be next
+        assert_eq!(next, member1);
+    }
+
+    #[test]
+    fn test_get_next_recipient_second_member() {
+        let env = Env::default();
+        let contract_id = env.register_contract(None, StellarSaveContract);
+        let client = StellarSaveContractClient::new(&env, &contract_id);
+        
+        let member1 = Address::generate(&env);
+        let member2 = Address::generate(&env);
+        let member3 = Address::generate(&env);
+
+        let group_id = 1;
+        
+        // Setup: Create members list
+        let mut members = Vec::new(&env);
+        members.push_back(member1.clone());
+        members.push_back(member2.clone());
+        members.push_back(member3.clone());
+        
+        let members_key = StorageKeyBuilder::group_members(group_id);
+        env.storage().persistent().set(&members_key, &members);
+        
+        // Create group
+        let group = Group::new(group_id, member1.clone(), 100, 3600, 3, 2, env.ledger().timestamp());
+        env.storage().persistent().set(&StorageKeyBuilder::group_data(group_id), &group);
+        
+        // Record payout for first member (cycle 0)
+        env.storage().persistent().set(&StorageKeyBuilder::payout_recipient(group_id, 0), &member1);
+
+        // Action: Get next recipient
+        let next = client.get_next_recipient(&group_id);
+        
+        // Verify: Second member should be next
+        assert_eq!(next, member2);
+    }
+
+    #[test]
+    fn test_get_next_recipient_last_member() {
+        let env = Env::default();
+        let contract_id = env.register_contract(None, StellarSaveContract);
+        let client = StellarSaveContractClient::new(&env, &contract_id);
+        
+        let member1 = Address::generate(&env);
+        let member2 = Address::generate(&env);
+        let member3 = Address::generate(&env);
+
+        let group_id = 1;
+        
+        // Setup: Create members list
+        let mut members = Vec::new(&env);
+        members.push_back(member1.clone());
+        members.push_back(member2.clone());
+        members.push_back(member3.clone());
+        
+        let members_key = StorageKeyBuilder::group_members(group_id);
+        env.storage().persistent().set(&members_key, &members);
+        
+        // Create group
+        let group = Group::new(group_id, member1.clone(), 100, 3600, 3, 2, env.ledger().timestamp());
+        env.storage().persistent().set(&StorageKeyBuilder::group_data(group_id), &group);
+        
+        // Record payouts for first two members
+        env.storage().persistent().set(&StorageKeyBuilder::payout_recipient(group_id, 0), &member1);
+        env.storage().persistent().set(&StorageKeyBuilder::payout_recipient(group_id, 1), &member2);
+
+        // Action: Get next recipient
+        let next = client.get_next_recipient(&group_id);
+        
+        // Verify: Third member should be next
+        assert_eq!(next, member3);
+    }
+
+    #[test]
+    #[should_panic(expected = "Status(ContractError(1003))")] // InvalidState
+    fn test_get_next_recipient_all_complete() {
+        let env = Env::default();
+        let contract_id = env.register_contract(None, StellarSaveContract);
+        let client = StellarSaveContractClient::new(&env, &contract_id);
+        
+        let member1 = Address::generate(&env);
+        let member2 = Address::generate(&env);
+
+        let group_id = 1;
+        
+        // Setup: Create members list
+        let mut members = Vec::new(&env);
+        members.push_back(member1.clone());
+        members.push_back(member2.clone());
+        
+        let members_key = StorageKeyBuilder::group_members(group_id);
+        env.storage().persistent().set(&members_key, &members);
+        
+        // Create group with current_cycle = 2 (all cycles complete)
+        let mut group = Group::new(group_id, member1.clone(), 100, 3600, 2, 2, env.ledger().timestamp());
+        group.current_cycle = 2;
+        env.storage().persistent().set(&StorageKeyBuilder::group_data(group_id), &group);
+        
+        // Record all payouts
+        env.storage().persistent().set(&StorageKeyBuilder::payout_recipient(group_id, 0), &member1);
+        env.storage().persistent().set(&StorageKeyBuilder::payout_recipient(group_id, 1), &member2);
+
+        // Action: Try to get next recipient when all complete
+        client.get_next_recipient(&group_id);
+    }
+
+    #[test]
+    #[should_panic(expected = "Status(ContractError(1001))")] // GroupNotFound
+    fn test_get_next_recipient_group_not_found() {
+        let env = Env::default();
+        let contract_id = env.register_contract(None, StellarSaveContract);
+        let client = StellarSaveContractClient::new(&env, &contract_id);
+
+        // Action: Try to get next recipient for non-existent group
+        client.get_next_recipient(&999);
+    }
+
+    #[test]
+    fn test_get_next_recipient_rotation_order() {
+        let env = Env::default();
+        let contract_id = env.register_contract(None, StellarSaveContract);
+        let client = StellarSaveContractClient::new(&env, &contract_id);
+        
+        let member1 = Address::generate(&env);
+        let member2 = Address::generate(&env);
+        let member3 = Address::generate(&env);
+        let member4 = Address::generate(&env);
+
+        let group_id = 1;
+        
+        // Setup: Create members list
+        let mut members = Vec::new(&env);
+        members.push_back(member1.clone());
+        members.push_back(member2.clone());
+        members.push_back(member3.clone());
+        members.push_back(member4.clone());
+        
+        let members_key = StorageKeyBuilder::group_members(group_id);
+        env.storage().persistent().set(&members_key, &members);
+        
+        // Create group
+        let group = Group::new(group_id, member1.clone(), 100, 3600, 4, 2, env.ledger().timestamp());
+        env.storage().persistent().set(&StorageKeyBuilder::group_data(group_id), &group);
+
+        // Test rotation: no payouts -> member1
+        let next = client.get_next_recipient(&group_id);
+        assert_eq!(next, member1);
+        
+        // Record payout for member1
+        env.storage().persistent().set(&StorageKeyBuilder::payout_recipient(group_id, 0), &member1);
+        
+        // Test rotation: after member1 -> member2
+        let next = client.get_next_recipient(&group_id);
+        assert_eq!(next, member2);
+        
+        // Record payout for member2
+        env.storage().persistent().set(&StorageKeyBuilder::payout_recipient(group_id, 1), &member2);
+        
+        // Test rotation: after member2 -> member3
+        let next = client.get_next_recipient(&group_id);
+        assert_eq!(next, member3);
+        
+        // Record payout for member3
+        env.storage().persistent().set(&StorageKeyBuilder::payout_recipient(group_id, 2), &member3);
+        
+        // Test rotation: after member3 -> member4
+        let next = client.get_next_recipient(&group_id);
+        assert_eq!(next, member4);
     }
 }
