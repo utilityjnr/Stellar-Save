@@ -682,6 +682,75 @@ impl StellarSaveContract {
         
         Ok(group.is_complete())
     }
+
+    /// Gets ordered list of upcoming payout recipients.
+    /// 
+    /// # Arguments
+    /// * `env` - Soroban environment
+    /// * `group_id` - ID of the group
+    /// 
+    /// # Returns
+    /// * `Ok(Vec<Address>)` - Ordered list of members who haven't received payout
+    /// * `Err(StellarSaveError)` - If group doesn't exist
+    pub fn get_payout_queue(
+        env: Env,
+        group_id: u64,
+    ) -> Result<Vec<Address>, StellarSaveError> {
+        let group_key = StorageKeyBuilder::group_data(group_id);
+        let _group = env.storage()
+            .persistent()
+            .get::<_, Group>(&group_key)
+            .ok_or(StellarSaveError::GroupNotFound)?;
+        
+        let members_key = StorageKeyBuilder::group_members(group_id);
+        let members: Vec<Address> = env.storage()
+            .persistent()
+            .get(&members_key)
+            .ok_or(StellarSaveError::GroupNotFound)?;
+        
+        let mut queue_entries = Vec::new(&env);
+        
+        for member in members.iter() {
+            let has_received = Self::has_received_payout(
+                env.clone(),
+                group_id,
+                member.clone(),
+            )?;
+            
+            if !has_received {
+                let position = Self::get_payout_position(
+                    env.clone(),
+                    group_id,
+                    member.clone(),
+                )?;
+                
+                queue_entries.push_back((member, position));
+            }
+        }
+        
+        let mut sorted_queue = Vec::new(&env);
+        let len = queue_entries.len();
+        
+        for i in 0..len {
+            let mut min_idx = i;
+            for j in (i + 1)..len {
+                if queue_entries.get(j).unwrap().1 < queue_entries.get(min_idx).unwrap().1 {
+                    min_idx = j;
+                }
+            }
+            if min_idx != i {
+                let temp = queue_entries.get(i).unwrap();
+                queue_entries.set(i, queue_entries.get(min_idx).unwrap());
+                queue_entries.set(min_idx, temp);
+            }
+        }
+        
+        for entry in queue_entries.iter() {
+            sorted_queue.push_back(entry.0);
+        }
+        
+        Ok(sorted_queue)
+    }
   
     /// Returns the number of members in a specific group.
     /// 
@@ -4669,6 +4738,89 @@ mod tests {
         let client = StellarSaveContractClient::new(&env, &contract_id);
         
         let result = client.try_is_complete(&999);
+        assert_eq!(result, Err(Ok(StellarSaveError::GroupNotFound)));
+    }
+    
+    #[test]
+    fn test_get_payout_queue_all_pending() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let contract_id = env.register_contract(None, StellarSaveContract);
+        let client = StellarSaveContractClient::new(&env, &contract_id);
+        
+        let creator = Address::generate(&env);
+        let member1 = Address::generate(&env);
+        let member2 = Address::generate(&env);
+        let group_id = client.create_group(&creator, &100, &3600, &3);
+        
+        client.join_group(&group_id, &creator);
+        client.join_group(&group_id, &member1);
+        client.join_group(&group_id, &member2);
+        
+        let queue = client.get_payout_queue(&group_id);
+        assert_eq!(queue.len(), 3);
+        assert_eq!(queue.get(0).unwrap(), creator);
+        assert_eq!(queue.get(1).unwrap(), member1);
+        assert_eq!(queue.get(2).unwrap(), member2);
+    }
+    
+    #[test]
+    fn test_get_payout_queue_some_received() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let contract_id = env.register_contract(None, StellarSaveContract);
+        let client = StellarSaveContractClient::new(&env, &contract_id);
+        
+        let creator = Address::generate(&env);
+        let member1 = Address::generate(&env);
+        let member2 = Address::generate(&env);
+        let group_id = client.create_group(&creator, &100, &3600, &3);
+        
+        client.join_group(&group_id, &creator);
+        client.join_group(&group_id, &member1);
+        client.join_group(&group_id, &member2);
+        
+        let recipient_key = StorageKeyBuilder::payout_recipient(group_id, 0);
+        env.storage().persistent().set(&recipient_key, &creator);
+        
+        let queue = client.get_payout_queue(&group_id);
+        assert_eq!(queue.len(), 2);
+        assert_eq!(queue.get(0).unwrap(), member1);
+        assert_eq!(queue.get(1).unwrap(), member2);
+    }
+    
+    #[test]
+    fn test_get_payout_queue_all_received() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let contract_id = env.register_contract(None, StellarSaveContract);
+        let client = StellarSaveContractClient::new(&env, &contract_id);
+        
+        let creator = Address::generate(&env);
+        let member1 = Address::generate(&env);
+        let member2 = Address::generate(&env);
+        let group_id = client.create_group(&creator, &100, &3600, &3);
+        
+        client.join_group(&group_id, &creator);
+        client.join_group(&group_id, &member1);
+        client.join_group(&group_id, &member2);
+        
+        env.storage().persistent().set(&StorageKeyBuilder::payout_recipient(group_id, 0), &creator);
+        env.storage().persistent().set(&StorageKeyBuilder::payout_recipient(group_id, 1), &member1);
+        env.storage().persistent().set(&StorageKeyBuilder::payout_recipient(group_id, 2), &member2);
+        
+        let queue = client.get_payout_queue(&group_id);
+        assert_eq!(queue.len(), 0);
+    }
+    
+    #[test]
+    fn test_get_payout_queue_group_not_found() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let contract_id = env.register_contract(None, StellarSaveContract);
+        let client = StellarSaveContractClient::new(&env, &contract_id);
+        
+        let result = client.try_get_payout_queue(&999);
         assert_eq!(result, Err(Ok(StellarSaveError::GroupNotFound)));
     }
 }
