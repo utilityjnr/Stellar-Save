@@ -7305,6 +7305,8 @@ mod tests {
         // Verify: Fails with InvalidState
         assert!(result.is_err());
         assert_eq!(result.unwrap_err(), StellarSaveError::InvalidState);
+    }
+
     // Tests for transfer_payout function
 
     #[test]
